@@ -26,9 +26,9 @@ go build ./cmd/... && go install ./cmd/...
 ```
 ### Ejecución:
 - Con la App instalada: ```bash 
-fiubados-server <port_number>```
+fiubados-server (port_number)```
 - Con la App SIN instalar: ```bash
- go run cmd/fiubados-server/server.go <port_number>```
+ go run cmd/fiubados-server/server.go (port_number)```
 
 ## Server.
 - Acepta conexiones de multiples jugadores a la vez.
