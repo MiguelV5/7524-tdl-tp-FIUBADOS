@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"strconv"
 	"time"
+	"sync"
 
 	"github.com/sebapenna/7524-tdl-tp/common"
 	"github.com/sebapenna/7524-tdl-tp/logger"
@@ -38,52 +39,58 @@ func RunStartGameAction(game Game) {
 	runGameLoop(game.player1, game.player2)
 }
 
-func readyToPlayLoop(player Player, otherPlayer Player, readyChannel chan bool) {
-	msgToSend := func(playerName string) string {
-		return common.MatchingPlayerMessage + playerName + common.ReadyToPlayMessage
-	}
 
-	var playerIsReady bool
-	for playerIsReady == false {
-		common.Send(player.socket, msgToSend(otherPlayer.name))
-		msg, err := common.Receive(player.socket)
-		if err != nil {
-			logger.LogError(err)
-			readyChannel <- false // Error in connection, return error
-			return
-		}
-		if msg == common.ReadyToPlay {
-			playerIsReady = true
-		}
-	}
+type ReadyToPlayCounter struct {
+    mu       sync.Mutex
+    counter  int
+}
 
-	readyChannel <- true
+
+func (c *ReadyToPlayCounter) IncrementPlayerCounter() {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    c.counter++
 }
 
 func notifyPlayersStartOfGame(player1 Player, player2 Player) error {
-	/*
-		Bool channel to notify player is ready to play.
-		True means players is ready to play. False that there was an
-		error and the game can not start.
-	*/
-	readyChannel := make(chan bool)
 
-	go readyToPlayLoop(player1, player2, readyChannel)
-	go readyToPlayLoop(player2, player1, readyChannel)
+	readyToPlayCounter := ReadyToPlayCounter{
+        counter: 0,
+    }
 
-	playersReady := 0
-	for {
-		ready := <-readyChannel // New player notified that is ready
-		if !ready {
-			// todo: mejora, notificar al player que no se desconecto que el otro abandono la partida
-			return errors.New("player disconnected before game started")
-		}
-		playersReady++
-		if playersReady == 2 {
-			break
-		}
-	}
-	return nil
+    var wg sync.WaitGroup
+
+    readyToPlayLoop := func(player Player, otherPlayer Player) {
+        msgToSend := func(playerName string) string {
+            return common.MatchingPlayerMessage + playerName + common.ReadyToPlayMessage
+        }
+
+        var playerIsReady bool
+        for !playerIsReady {
+            common.Send(player.socket, msgToSend(otherPlayer.name))
+            msg, err := common.Receive(player.socket)
+            if err != nil {
+                logger.LogError(err)
+                return
+            }
+            if msg == common.ReadyToPlay {
+                playerIsReady = true
+            }
+        }
+        readyToPlayCounter.IncrementPlayerCounter()
+        wg.Done()
+    }
+    wg.Add(2)
+	go readyToPlayLoop(player1, player2)
+	go readyToPlayLoop(player2, player1)
+    wg.Wait()
+
+    if readyToPlayCounter.counter < 2 {
+        return errors.New("player disconnected before game started")
+    } else {
+        return nil
+    }
+
 }
 
 type Answer struct {
@@ -203,11 +210,106 @@ func readAnswersAndDistributePoints(
 		}
 	}
 
-	if answer1.optionChosen == questionAsked.correctOption {
-		answer1.player.points++
-	} else {
+	distributePointsAccordingToOptionsReceived(&answer1, &answer2, questionAsked.correctOption)
+
+}
+
+//Distributes points based on the options chosen by the players
+func distributePointsAccordingToOptionsReceived(answer1 *Answer, answer2 *Answer, correctOption int) {
+
+	if answer1.optionChosen == correctOption && answer2.optionChosen == correctOption {
+		answer1.player.points += 3
 		answer2.player.points++
+		answer1.player.wasFirstToAnswerCorrectly = true
+		answer2.player.wasFirstToAnswerCorrectly = false
+		answer1.player.lastAnswerWasCorrect = true
+		answer2.player.lastAnswerWasCorrect = true
+
+	} else if answer1.optionChosen == correctOption && answer2.optionChosen != correctOption {
+		answer1.player.points += 3
+		answer1.player.lastAnswerWasCorrect = true
+		answer2.player.lastAnswerWasCorrect = false
+
+	} else if answer1.optionChosen != correctOption && answer2.optionChosen == correctOption {
+		answer2.player.points += 3
+		answer1.player.lastAnswerWasCorrect = false
+		answer2.player.lastAnswerWasCorrect = true
+
+	} else {
+		answer1.player.lastAnswerWasCorrect = false
+		answer2.player.lastAnswerWasCorrect = false
 	}
+
+}
+
+func showCorrectAnswer(player1 Player, player2 Player, questionAsked Question) error {
+	readyToContinueChannel := make(chan bool)
+	messageToSendPlayer1, messageToSendPlayer2 := getMessagesToSendAccordingToWhoeverAnsweredCorrectlyOrNot(player1, player2, questionAsked)
+
+	messageToSendPlayer1 += "    Presiona ENTER para continuar"
+	messageToSendPlayer2 += "    Presiona ENTER para continuar"
+
+	go readyToContinue(player1, messageToSendPlayer1, readyToContinueChannel)
+	go readyToContinue(player2, messageToSendPlayer2, readyToContinueChannel)
+
+	playersReady := 0
+	for {
+		ready := <-readyToContinueChannel
+		if !ready {
+			return errors.New("Player disconnected during the game")
+		}
+		playersReady++
+		if playersReady == 2 {
+			break
+		}
+	}
+	return nil
+}
+
+//Returns the messages to send according to:
+//	- Who answered a question correctly or incorrectly.
+//	- If both answered correctly, who answered first to get more points.
+func getMessagesToSendAccordingToWhoeverAnsweredCorrectlyOrNot(player1, player2 Player, questionAsked Question) (string, string) {
+
+	var messageToSendPlayer1 string
+	var messageToSendPlayer2 string
+
+	if player1.wasFirstToAnswerCorrectly && player2.lastAnswerWasCorrect {
+		messageToSendPlayer1 = common.CorrectAnswerMessage + common.WasFirstToAnswerMessage
+		messageToSendPlayer2 = common.CorrectAnswerMessage + common.WasSecondToAnswerMessage
+
+	} else if player1.lastAnswerWasCorrect && player2.wasFirstToAnswerCorrectly {
+		messageToSendPlayer1 = common.CorrectAnswerMessage + common.WasSecondToAnswerMessage
+		messageToSendPlayer2 = common.CorrectAnswerMessage + common.WasFirstToAnswerMessage
+
+	} else if player1.lastAnswerWasCorrect && !player2.lastAnswerWasCorrect {
+		messageToSendPlayer1 = common.CorrectAnswerMessage + common.OpponentAnsweredIncorrectlyMessage
+		messageToSendPlayer2 = common.IncorrectAnswerMessage + common.WhichWasCorrectAnswerMessage + strconv.Itoa(questionAsked.correctOption) + ") " + questionAsked.options[questionAsked.correctOption-1]
+
+	} else if !player1.lastAnswerWasCorrect && player2.lastAnswerWasCorrect {
+		messageToSendPlayer1 = common.IncorrectAnswerMessage + common.WhichWasCorrectAnswerMessage + strconv.Itoa(questionAsked.correctOption) + ") " + questionAsked.options[questionAsked.correctOption-1]
+		messageToSendPlayer2 = common.CorrectAnswerMessage + common.OpponentAnsweredIncorrectlyMessage
+
+	} else { //Both answered incorrectly
+		messageToSendPlayer1 = common.IncorrectAnswerMessage + common.WhichWasCorrectAnswerMessage + strconv.Itoa(questionAsked.correctOption) + ") " + questionAsked.options[questionAsked.correctOption-1]
+		messageToSendPlayer2 = common.IncorrectAnswerMessage + common.WhichWasCorrectAnswerMessage + strconv.Itoa(questionAsked.correctOption) + ") " + questionAsked.options[questionAsked.correctOption-1]
+
+	}
+
+	return messageToSendPlayer1, messageToSendPlayer2
+
+}
+
+func readyToContinue(player Player, messageToSend string, readyToContinueChannel chan bool) {
+	common.Send(player.socket, messageToSend)
+	msg, err := common.Receive(player.socket)
+	if err != nil {
+		logger.LogError(err)
+		readyToContinueChannel <- false // Error in connection, return error
+		return
+	}
+	logger.LogInfo("Player " + strconv.Itoa(player.id) + " send: " + msg)
+	readyToContinueChannel <- true
 }
 
 func runGameLoop(player1 Player, player2 Player) {
@@ -241,6 +343,7 @@ func runGameLoop(player1 Player, player2 Player) {
 			questionsChannel2 <- questionToAsk
 
 			readAnswersAndDistributePoints(answersChannel, errorChannel, &player1, &player2, questionToAsk)
+			showCorrectAnswer(player1, player2, questionToAsk)
 		}
 	}
 
