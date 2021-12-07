@@ -3,6 +3,7 @@ package logger
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/sebapenna/7524-tdl-tp/common"
 )
@@ -20,7 +21,17 @@ func LogInfo(a ...interface{}) {
 }
 
 func PrintMessageReceived(msg string) {
-	//colorCyan := "\033[96m"
-	//colorReset := "\033[0m"
-	fmt.Println(string(common.ColorCyan), "->: "+msg, string(common.ColorReset))
+
+	if strings.HasPrefix(common.AskForNameMessage, msg) {
+		fmt.Println(string(common.ColorCyan), common.ServerArrow+common.AsciAskForNameMessage, string(common.ColorReset))
+	} else if strings.Contains(msg, common.WinnerMessage) || strings.Contains(msg, common.OtherPlayerDisconnectedMessage) {
+		fmt.Println(string(common.ColorCyan), common.ServerArrow+msg, string(common.ColorReset))
+		fmt.Println(string(common.ColorYellow), common.AsciWinnerMessage, string(common.ColorReset))
+	} else if strings.Contains(msg, common.TieMessage) {
+		fmt.Println(string(common.ColorCyan), common.ServerArrow+msg, string(common.ColorReset))
+		fmt.Println(string(common.ColorYellow), common.AsciTieMessage, string(common.ColorReset))
+	} else {
+		fmt.Println(string(common.ColorCyan), common.ServerArrow+msg, string(common.ColorReset))
+	}
+
 }
